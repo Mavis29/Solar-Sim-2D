@@ -1,6 +1,11 @@
-use std::f64::consts::PI;
+use std::{
+    f64::consts::PI,
+    ops::{Add, AddAssign, Mul, MulAssign, Sub, SubAssign},
+};
 
 use raylib::{color::Color, drawing::RaylibDraw, ffi::GetTime};
+
+mod renderer;
 
 #[derive(Clone)]
 struct SimState {
@@ -10,6 +15,7 @@ struct SimState {
     ud: f64,             // update delay
     yps: f64,            // simulated earth years per second
     dt: f64,             // simulated time per update
+    alpha: f64,
     bodies: Vec<CelestialBody>,
 }
 
@@ -19,52 +25,68 @@ struct Vec2 {
     y: f64,
 }
 
+impl Add for Vec2 {
+    type Output = Self;
+
+    fn add(self, other: Self) -> Self {
+        Self {
+            x: self.x + other.x,
+            y: self.y + other.y,
+        }
+    }
+}
+
+impl AddAssign for Vec2 {
+    fn add_assign(&mut self, other: Self) {
+        *self = Self {
+            x: self.x + other.x,
+            y: self.y + other.y,
+        }
+    }
+}
+
+impl Sub for Vec2 {
+    type Output = Self;
+
+    fn sub(self, other: Self) -> Self::Output {
+        Self {
+            x: self.x - other.x,
+            y: self.y - other.y,
+        }
+    }
+}
+
+impl SubAssign for Vec2 {
+    fn sub_assign(&mut self, other: Self) {
+        *self = Self {
+            x: self.x - other.x,
+            y: self.y - other.y,
+        }
+    }
+}
+
+impl Mul<f64> for Vec2 {
+    type Output = Self;
+    fn mul(self, scalar: f64) -> Self::Output {
+        Self {
+            x: self.x * scalar,
+            y: self.y * scalar,
+        }
+    }
+}
+
+impl MulAssign<f64> for Vec2 {
+    fn mul_assign(&mut self, scalar: f64) {
+        *self = Self {
+            x: self.x * scalar,
+            y: self.y * scalar,
+        }
+    }
+}
+
 impl Vec2 {
-    fn add(&mut self, b: Vec2) {
-        let x = self.x + b.x;
-        let y = self.y + b.y;
-        self.x = x;
-        self.y = y;
-    }
-
-    fn subtract(&mut self, b: Vec2) {
-        let x = self.x - b.x;
-        let y = self.y - b.y;
-        self.x = x;
-        self.y = y;
-    }
-
-    fn scale(&mut self, s: f64) {
-        self.x *= s;
-        self.y *= s;
-    }
-
-    fn add_vec(&self, b: Vec2) -> Vec2 {
-        let x = self.x + b.x;
-        let y = self.y + b.y;
-        Vec2 { x, y }
-    }
-
-    fn subtract_vec(&self, b: Vec2) -> Vec2 {
-        let x = self.x - b.x;
-        let y = self.y - b.y;
-        Vec2 { x, y }
-    }
-
-    fn scale_vec(&self, s: f64) -> Vec2 {
-        let x = self.x * s;
-        let y = self.y * s;
-        Vec2 { x, y }
-    }
-
     fn magnitude(&self) -> f64 {
         (self.x * self.x + self.y * self.y).sqrt()
-    }
-
-    fn normalise(&mut self) {
-        let mag = self.magnitude();
-        self.x /= mag;
-        self.y /= mag;
     }
 
     fn normalise_vec(&self) -> Vec2 {
@@ -77,7 +99,7 @@ impl Vec2 {
 
 #[derive(Clone)]
 struct CelestialBody {
-    name: String,
+    name: &'static str,
     mass: f64,           // in Solar Mass
     radius: f64,         // in AU
     position: Vec2,      // in AU
@@ -88,7 +110,7 @@ struct CelestialBody {
 }
 
 const WIDTH: i32 = 1200;
-const HEIGHT: i32 = 1200;
+const HEIGHT: i32 = 900;
 const G: f64 = 4.0 * PI * PI;
 
 const DEFAULT_STATE: SimState = SimState {
@@ -98,6 +120,7 @@ const DEFAULT_STATE: SimState = SimState {
     ud: 1.0 / 1000.0,
     yps: 0.27397,
     dt: 0.27397 / 1000.0,
+    alpha: 0.0,
     bodies: Vec::new(),
 };
 
@@ -107,7 +130,6 @@ fn main() {
 
     let (mut rl, thread) = raylib::init()
         .size(WIDTH, HEIGHT)
-        .fullscreen()
         .title("Solar Sim")
         .msaa_4x()
         .build();
@@ -136,7 +158,7 @@ fn main() {
             accumulator -= state.ud;
         }
 
-        let alpha = accumulator / state.ud;
+        state.alpha = accumulator / state.ud;
 
         // Rendering
         if now - last_time >= 1.0 {
@@ -146,87 +168,44 @@ fn main() {
         }
 
         d.clear_background(Color::BLACK);
+        renderer::draw_fps(&mut d, fps);
+        renderer::draw_planets(&mut d, &state);
+        renderer::draw_velocities(&mut d, &state);
 
-        let fps_text = &format!("FPS: {fps}");
-        d.draw_text(&fps_text, 10, 10, 20, Color::RAYWHITE);
-
-        let screen_width = d.get_screen_width();
-        let screen_height = d.get_screen_height();
-
-        // 0, 0
-        let center_x = screen_width / 2;
-        let center_y = screen_height / 2;
-
-        // Drawing planets
-        d.draw_text("Velocities:", 10, 40, 20, Color::RAYWHITE);
-        for i in 0..state.bodies.len() {
-            let body = &state.bodies[i];
-            let interp_x = interpolate(body.last_position.x, body.position.x, alpha);
-            let interp_y = interpolate(body.last_position.y, body.position.y, alpha);
-            let screen_x = center_x as f64 + interp_x * state.distance_scale;
-            let screen_y = center_y as f64 - interp_y * state.distance_scale;
-            d.draw_circle(
-                screen_x as i32,
-                screen_y as i32,
-                (body.radius * state.radius_scale) as f32,
-                body.color,
-            );
-            let name = body.name.clone();
-            let name_size = d.measure_text(&name, 12);
-            let name_x = screen_x as i32 - name_size / 2;
-            /*
-                        d.draw_text(
-                            &name,
-                            name_x,
-                            (screen_y + body.radius * RADIUS_SCALE) as i32,
-                            10,
-                            Color::RAYWHITE,
-                        );
-            */
-            let j: i32 = i.try_into().unwrap();
-            let text_y: i32 = 65 + j * 22;
-            let velocity_text = &format!("{name} [{:.3}, {:.3}]", body.velocity.x, body.velocity.y);
-            d.draw_text(&velocity_text, 10, text_y, 20, Color::RAYWHITE);
-        }
         frames += 1;
     }
+}
 
-    fn update(state: &mut SimState) {
-        // Updating state
-        state.ud = 1.0 / state.ups;
-        state.dt = state.yps / state.ups;
+fn update(state: &mut SimState) {
+    // Updating state
+    state.ud = 1.0 / state.ups;
+    state.dt = state.yps / state.ups;
 
-        // Acceleration
-        for i in 0..state.bodies.len() {
-            let mut acceleration = Vec2 { x: 0.0, y: 0.0 };
+    // Acceleration
+    for i in 0..state.bodies.len() {
+        let mut acceleration = Vec2 { x: 0.0, y: 0.0 };
 
-            for j in 0..state.bodies.len() {
-                if i == j {
-                    continue;
-                }
-
-                let direction = state.bodies[j]
-                    .position
-                    .subtract_vec(state.bodies[i].position);
-                let distance = direction.magnitude();
-
-                let scale = G * state.bodies[j].mass / (distance * distance);
-                acceleration.add(direction.normalise_vec().scale_vec(scale));
+        for j in 0..state.bodies.len() {
+            if i == j {
+                continue;
             }
 
-            state.bodies[i].acceleration = acceleration;
+            let direction = state.bodies[j].position - state.bodies[i].position;
+
+            let distance = direction.magnitude();
+
+            let scale = G * state.bodies[j].mass / (distance * distance);
+            acceleration += direction.normalise_vec() * scale;
         }
 
-        // Velocity
-        for body in state.bodies.iter_mut() {
-            body.last_position = body.position;
-            body.velocity.add(body.acceleration.scale_vec(state.dt));
-            body.position.add(body.velocity.scale_vec(state.dt));
-        }
+        state.bodies[i].acceleration = acceleration;
     }
 
-    fn interpolate(previous: f64, current: f64, alpha: f64) -> f64 {
-        previous + (current - previous) * alpha
+    // Velocity & Position
+    for body in state.bodies.iter_mut() {
+        body.last_position = body.position;
+        body.velocity += body.acceleration * state.dt;
+        body.position += body.velocity * state.dt;
     }
 }
 
@@ -234,7 +213,7 @@ fn create_bodies() -> Vec<CelestialBody> {
     let mut bodies: Vec<CelestialBody> = Vec::new();
 
     let sun = CelestialBody {
-        name: "Sun".to_string(),
+        name: "Sun",
         mass: 1.0,
         radius: 1.5,
         position: Vec2 { x: 0.0, y: 0.0 },
@@ -245,7 +224,7 @@ fn create_bodies() -> Vec<CelestialBody> {
     };
 
     let earth = CelestialBody {
-        name: "Earth".to_owned(),
+        name: "Earth",
         mass: 3.003e-6,
         radius: 0.5,
         position: Vec2 { x: 1.0, y: 0.0 },
@@ -255,19 +234,20 @@ fn create_bodies() -> Vec<CelestialBody> {
         color: Color::AQUA,
     };
 
+    #[allow(unused_variables)]
     let moon = CelestialBody {
-        name: "Moon".to_owned(),
+        name: "Moon",
         mass: 3.69e-8,
         radius: 0.1,
-        position: earth.position.add_vec(Vec2 { x: 0.00257, y: 0.0 }),
-        last_position: earth.position.add_vec(Vec2 { x: 0.00257, y: 0.0 }),
-        velocity: earth.velocity.add_vec(Vec2 { x: 0.0, y: 0.215 }),
+        position: earth.position + Vec2 { x: 0.00257, y: 0.0 },
+        last_position: earth.position + Vec2 { x: 0.00257, y: 0.0 },
+        velocity: earth.velocity + Vec2 { x: 0.0, y: 0.215 },
         acceleration: Vec2 { x: 0.0, y: 0.0 },
         color: Color::WHITESMOKE,
     };
 
     let mars = CelestialBody {
-        name: "Mars".to_owned(),
+        name: "Mars",
         mass: 3.27e-10,
         radius: 0.25,
         position: Vec2 { x: 1.52, y: 0.0 },
@@ -278,7 +258,7 @@ fn create_bodies() -> Vec<CelestialBody> {
     };
 
     let mercury = CelestialBody {
-        name: "Mercury".to_owned(),
+        name: "Mercury",
         mass: 1.66e-7,
         radius: 0.1,
         position: Vec2 { x: 0.387, y: 0.0 },
@@ -289,7 +269,7 @@ fn create_bodies() -> Vec<CelestialBody> {
     };
 
     let venus = CelestialBody {
-        name: "Venus".to_owned(),
+        name: "Venus",
         mass: 2.45e-6,
         radius: 0.5,
         position: Vec2 { x: 0.72, y: 0.0 },
@@ -300,7 +280,7 @@ fn create_bodies() -> Vec<CelestialBody> {
     };
 
     let jupiter = CelestialBody {
-        name: "Jupiter".to_owned(),
+        name: "Jupiter",
         mass: 9.54e-4,
         radius: 0.8,
         position: Vec2 { x: 5.2, y: 0.0 },
@@ -311,7 +291,7 @@ fn create_bodies() -> Vec<CelestialBody> {
     };
 
     let saturn = CelestialBody {
-        name: "Saturn".to_owned(),
+        name: "Saturn",
         mass: 2.86e-4,
         radius: 0.7,
         position: Vec2 { x: 9.5, y: 0.0 },
@@ -322,7 +302,7 @@ fn create_bodies() -> Vec<CelestialBody> {
     };
 
     let uranus = CelestialBody {
-        name: "Uranus".to_owned(),
+        name: "Uranus",
         mass: 4.37e-5,
         radius: 0.6,
         position: Vec2 { x: 19.2, y: 0.0 },
@@ -333,7 +313,7 @@ fn create_bodies() -> Vec<CelestialBody> {
     };
 
     let neptune = CelestialBody {
-        name: "Neptune".to_owned(),
+        name: "Neptune",
         mass: 5.15e-5,
         radius: 0.6,
         position: Vec2 { x: 30.07, y: 0.0 },
