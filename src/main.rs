@@ -2,6 +2,17 @@ use std::f64::consts::PI;
 
 use raylib::{color::Color, drawing::RaylibDraw, ffi::GetTime};
 
+#[derive(Clone)]
+struct SimState {
+    distance_scale: f64, // 1 AU in pixels
+    radius_scale: f64,   // radius scale in pixels
+    ups: f64,            // updates per second
+    ud: f64,             // update delay
+    yps: f64,            // simulated earth years per second
+    dt: f64,             // simulated time per update
+    bodies: Vec<CelestialBody>,
+}
+
 #[derive(Clone, Copy)]
 struct Vec2 {
     x: f64,
@@ -78,15 +89,148 @@ struct CelestialBody {
 
 const WIDTH: i32 = 1200;
 const HEIGHT: i32 = 1200;
-const DISTANCE_SCALE: f64 = 150.0;
-const RADIUS_SCALE: f64 = 15.0;
 const G: f64 = 4.0 * PI * PI;
-const UPS: f64 = 1000.0; // updates/s
-const UD: f64 = 1.0 / UPS; // update delay in s
-const YPS: f64 = 0.27397; // yr/s
-const DT: f64 = YPS / UPS; // years/update
+
+const DEFAULT_STATE: SimState = SimState {
+    distance_scale: 150.0,
+    radius_scale: 15.0,
+    ups: 1000.0,
+    ud: 1.0 / 1000.0,
+    yps: 0.27397,
+    dt: 0.27397 / 1000.0,
+    bodies: Vec::new(),
+};
 
 fn main() {
+    let mut state = DEFAULT_STATE.clone();
+    state.bodies = create_bodies();
+
+    let (mut rl, thread) = raylib::init()
+        .size(WIDTH, HEIGHT)
+        .fullscreen()
+        .title("Solar Sim")
+        .msaa_4x()
+        .build();
+
+    let mut accumulator = 0.0;
+    let mut last_frame: f64;
+    let mut last_time: f64;
+    let mut frames: i32 = 0;
+    let mut fps: i32 = 0;
+    unsafe {
+        last_frame = GetTime();
+        last_time = last_frame;
+    }
+    while !rl.window_should_close() {
+        let mut d = rl.begin_drawing(&thread);
+        let now = d.get_time();
+
+        let delta_time = now - last_frame;
+        last_frame = now;
+
+        accumulator += delta_time;
+
+        // Updating
+        while accumulator >= state.ud {
+            update(&mut state);
+            accumulator -= state.ud;
+        }
+
+        let alpha = accumulator / state.ud;
+
+        // Rendering
+        if now - last_time >= 1.0 {
+            last_time += 1.0;
+            fps = frames;
+            frames = 0;
+        }
+
+        d.clear_background(Color::BLACK);
+
+        let fps_text = &format!("FPS: {fps}");
+        d.draw_text(&fps_text, 10, 10, 20, Color::RAYWHITE);
+
+        let screen_width = d.get_screen_width();
+        let screen_height = d.get_screen_height();
+
+        // 0, 0
+        let center_x = screen_width / 2;
+        let center_y = screen_height / 2;
+
+        // Drawing planets
+        d.draw_text("Velocities:", 10, 40, 20, Color::RAYWHITE);
+        for i in 0..state.bodies.len() {
+            let body = &state.bodies[i];
+            let interp_x = interpolate(body.last_position.x, body.position.x, alpha);
+            let interp_y = interpolate(body.last_position.y, body.position.y, alpha);
+            let screen_x = center_x as f64 + interp_x * state.distance_scale;
+            let screen_y = center_y as f64 - interp_y * state.distance_scale;
+            d.draw_circle(
+                screen_x as i32,
+                screen_y as i32,
+                (body.radius * state.radius_scale) as f32,
+                body.color,
+            );
+            let name = body.name.clone();
+            let name_size = d.measure_text(&name, 12);
+            let name_x = screen_x as i32 - name_size / 2;
+            /*
+                        d.draw_text(
+                            &name,
+                            name_x,
+                            (screen_y + body.radius * RADIUS_SCALE) as i32,
+                            10,
+                            Color::RAYWHITE,
+                        );
+            */
+            let j: i32 = i.try_into().unwrap();
+            let text_y: i32 = 65 + j * 22;
+            let velocity_text = &format!("{name} [{:.3}, {:.3}]", body.velocity.x, body.velocity.y);
+            d.draw_text(&velocity_text, 10, text_y, 20, Color::RAYWHITE);
+        }
+        frames += 1;
+    }
+
+    fn update(state: &mut SimState) {
+        // Updating state
+        state.ud = 1.0 / state.ups;
+        state.dt = state.yps / state.ups;
+
+        // Acceleration
+        for i in 0..state.bodies.len() {
+            let mut acceleration = Vec2 { x: 0.0, y: 0.0 };
+
+            for j in 0..state.bodies.len() {
+                if i == j {
+                    continue;
+                }
+
+                let direction = state.bodies[j]
+                    .position
+                    .subtract_vec(state.bodies[i].position);
+                let distance = direction.magnitude();
+
+                let scale = G * state.bodies[j].mass / (distance * distance);
+                acceleration.add(direction.normalise_vec().scale_vec(scale));
+            }
+
+            state.bodies[i].acceleration = acceleration;
+        }
+
+        // Velocity
+        for body in state.bodies.iter_mut() {
+            body.last_position = body.position;
+            body.velocity.add(body.acceleration.scale_vec(state.dt));
+            body.position.add(body.velocity.scale_vec(state.dt));
+        }
+    }
+
+    fn interpolate(previous: f64, current: f64, alpha: f64) -> f64 {
+        previous + (current - previous) * alpha
+    }
+}
+
+fn create_bodies() -> Vec<CelestialBody> {
     let mut bodies: Vec<CelestialBody> = Vec::new();
 
     let sun = CelestialBody {
@@ -209,121 +353,5 @@ fn main() {
     bodies.push(uranus);
     bodies.push(neptune);
 
-    let (mut rl, thread) = raylib::init()
-        .size(WIDTH, HEIGHT)
-        .fullscreen()
-        .title("Solar Sim")
-        .msaa_4x()
-        .build();
-
-    let mut accumulator = 0.0;
-    let mut last_frame: f64;
-    let mut last_time: f64;
-    let mut frames: i32 = 0;
-    let mut fps: i32 = 0;
-    unsafe {
-        last_frame = GetTime();
-        last_time = last_frame;
-    }
-    while !rl.window_should_close() {
-        let mut d = rl.begin_drawing(&thread);
-        let now = d.get_time();
-
-        let delta_time = now - last_frame;
-        last_frame = now;
-
-        accumulator += delta_time;
-
-        // Updating
-        while accumulator >= UD {
-            update(&mut bodies);
-            accumulator -= UD;
-        }
-
-        let alpha = accumulator / UD;
-
-        // Rendering
-        if now - last_time >= 1.0 {
-            last_time += 1.0;
-            fps = frames;
-            frames = 0;
-        }
-
-        d.clear_background(Color::BLACK);
-
-        let fps_text = &format!("FPS: {fps}");
-        d.draw_text(&fps_text, 10, 10, 20, Color::RAYWHITE);
-
-        let screen_width = d.get_screen_width();
-        let screen_height = d.get_screen_height();
-
-        // 0, 0
-        let center_x = screen_width / 2;
-        let center_y = screen_height / 2;
-
-        // Drawing planets
-        d.draw_text("Velocities:", 10, 40, 20, Color::RAYWHITE);
-        for i in 0..bodies.len() {
-            let body = &bodies[i];
-            let interp_x = interpolate(body.last_position.x, body.position.x, alpha);
-            let interp_y = interpolate(body.last_position.y, body.position.y, alpha);
-            let screen_x = center_x as f64 + interp_x * DISTANCE_SCALE;
-            let screen_y = center_y as f64 - interp_y * DISTANCE_SCALE;
-            d.draw_circle(
-                screen_x as i32,
-                screen_y as i32,
-                (body.radius * RADIUS_SCALE) as f32,
-                body.color,
-            );
-            let name = body.name.clone();
-            let name_size = d.measure_text(&name, 12);
-            let name_x = screen_x as i32 - name_size / 2;
-            /*
-                        d.draw_text(
-                            &name,
-                            name_x,
-                            (screen_y + body.radius * RADIUS_SCALE) as i32,
-                            10,
-                            Color::RAYWHITE,
-                        );
-            */
-            let j: i32 = i.try_into().unwrap();
-            let text_y: i32 = 65 + j * 22;
-            let velocity_text = &format!("{name} [{:.3}, {:.3}]", body.velocity.x, body.velocity.y);
-            d.draw_text(&velocity_text, 10, text_y, 20, Color::RAYWHITE);
-        }
-        frames += 1;
-    }
-
-    fn update(bodies: &mut Vec<CelestialBody>) {
-        // Acceleration
-        for i in 0..bodies.len() {
-            let mut acceleration = Vec2 { x: 0.0, y: 0.0 };
-
-            for j in 0..bodies.len() {
-                if i == j {
-                    continue;
-                }
-
-                let direction = bodies[j].position.subtract_vec(bodies[i].position);
-                let distance = direction.magnitude();
-
-                let scale = G * bodies[j].mass / (distance * distance);
-                acceleration.add(direction.normalise_vec().scale_vec(scale));
-            }
-
-            bodies[i].acceleration = acceleration;
-        }
-
-        // Velocity
-        for body in bodies.iter_mut() {
-            body.last_position = body.position;
-            body.velocity.add(body.acceleration.scale_vec(DT));
-            body.position.add(body.velocity.scale_vec(DT));
-        }
-    }
-
-    fn interpolate(previous: f64, current: f64, alpha: f64) -> f64 {
-        previous + (current - previous) * alpha
-    }
+    bodies
 }
